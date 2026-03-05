@@ -403,15 +403,22 @@ Detailed event data is also indexed into FTS5 for on-demand retrieval via `searc
 
 ## Utility Commands
 
-The `stats`, `doctor`, and `upgrade` MCP tools (listed in the Tools table above) double as utility commands. Type any of these to invoke them:
+**Inside any AI session** — just type the command. The LLM calls the MCP tool automatically:
 
 ```
-ctx stats    ctx-stats    /ctx-stats
-ctx doctor   ctx-doctor   /ctx-doctor
-ctx upgrade  ctx-upgrade  /ctx-upgrade
+ctx stats       → context savings, call counts, session report
+ctx doctor      → diagnose runtimes, hooks, FTS5, versions
+ctx upgrade     → update from GitHub, rebuild, reconfigure hooks
 ```
 
-Works on **all platforms**. On Claude Code, slash command variants (`/ctx-stats`) are also available via Skills.
+**From your terminal** — run directly without an AI session:
+
+```bash
+context-mode doctor
+context-mode upgrade
+```
+
+Works on **all platforms**. On Claude Code, slash commands (`/ctx-stats`, `/ctx-doctor`, `/ctx-upgrade`) are also available.
 
 ## Benchmarks
 
