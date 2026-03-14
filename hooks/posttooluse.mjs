@@ -28,26 +28,29 @@ try {
 
   const dbPath = getSessionDBPath();
   const db = new SessionDB({ dbPath });
-  const sessionId = getSessionId(input);
 
-  // Ensure session meta exists
-  db.ensureSession(sessionId, process.env.CLAUDE_PROJECT_DIR || process.cwd());
+  try {
+    const sessionId = getSessionId(input);
 
-  // Extract and store events
-  const events = extractEvents({
-    tool_name: input.tool_name,
-    tool_input: input.tool_input ?? {},
-    tool_response: typeof input.tool_response === "string"
-      ? input.tool_response
-      : JSON.stringify(input.tool_response ?? ""),
-    tool_output: input.tool_output,
-  });
+    // Ensure session meta exists
+    db.ensureSession(sessionId, process.env.CLAUDE_PROJECT_DIR || process.cwd());
 
-  for (const event of events) {
-    db.insertEvent(sessionId, event, "PostToolUse");
+    // Extract and store events
+    const events = extractEvents({
+      tool_name: input.tool_name,
+      tool_input: input.tool_input ?? {},
+      tool_response: typeof input.tool_response === "string"
+        ? input.tool_response
+        : JSON.stringify(input.tool_response ?? ""),
+      tool_output: input.tool_output,
+    });
+
+    for (const event of events) {
+      db.insertEvent(sessionId, event, "PostToolUse");
+    }
+  } finally {
+    try { db.close(); } catch { /* ignore */ }
   }
-
-  db.close();
 } catch {
   // PostToolUse must never block the session — silent fallback
 }

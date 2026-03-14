@@ -35,25 +35,28 @@ try {
     const { extractUserEvents } = await loadExtract();
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
-    const sessionId = getSessionId(input);
 
-    db.ensureSession(sessionId, process.env.CLAUDE_PROJECT_DIR || process.cwd());
+    try {
+      const sessionId = getSessionId(input);
 
-    // 1. Always save the raw prompt
-    db.insertEvent(sessionId, {
-      type: "user_prompt",
-      category: "prompt",
-      data: prompt,
-      priority: 1,
-    }, "UserPromptSubmit");
+      db.ensureSession(sessionId, process.env.CLAUDE_PROJECT_DIR || process.cwd());
 
-    // 2. Extract decision/role/intent/data from user message
-    const userEvents = extractUserEvents(trimmed);
-    for (const ev of userEvents) {
-      db.insertEvent(sessionId, ev, "UserPromptSubmit");
+      // 1. Always save the raw prompt
+      db.insertEvent(sessionId, {
+        type: "user_prompt",
+        category: "prompt",
+        data: prompt,
+        priority: 1,
+      }, "UserPromptSubmit");
+
+      // 2. Extract decision/role/intent/data from user message
+      const userEvents = extractUserEvents(trimmed);
+      for (const ev of userEvents) {
+        db.insertEvent(sessionId, ev, "UserPromptSubmit");
+      }
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
     }
-
-    db.close();
   }
 } catch {
   // UserPromptSubmit must never block the session — silent fallback

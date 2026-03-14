@@ -12,6 +12,9 @@ import "./suppress-stderr.mjs";
  * - "compact"  → Auto-compact triggered. Inject resume snapshot + stats.
  * - "resume"   → User used --continue. Full history, no resume needed.
  * - "clear"    → User cleared context. No resume.
+ *
+ * Safety: This hook MUST always output valid JSON and exit cleanly.
+ * A hanging or crashing SessionStart hook blocks Claude Code startup.
  */
 
 import { ROUTING_BLOCK } from "./routing-block.mjs";
@@ -20,12 +23,47 @@ import { writeSessionEventsFile, buildSessionDirective, getSessionEvents, getLat
 import { createSessionLoaders } from "./session-loaders.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 
 // Resolve absolute path for imports (fileURLToPath for Windows compat)
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
 const { loadSessionDB } = createSessionLoaders(HOOK_DIR);
+
+const DEBUG_LOG = join(homedir(), ".claude", "context-mode", "sessionstart-debug.log");
+
+/** Append to debug log — best-effort, never throws. */
+function debugLog(msg) {
+  try {
+    appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch { /* ignore */ }
+}
+
+/** Emit the final JSON response and exit. Always called exactly once. */
+function emitAndExit(additionalContext) {
+  try {
+    console.log(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext,
+      },
+    }));
+  } catch {
+    // Absolute last resort — emit minimal valid JSON
+    process.stdout.write('{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":""}}\n');
+  }
+  process.exit(0);
+}
+
+// Process-level safety net — guarantee JSON output on any unhandled error
+process.on("uncaughtException", (err) => {
+  debugLog(`uncaughtException: ${err?.message || err}\n${err?.stack || ""}`);
+  emitAndExit(ROUTING_BLOCK);
+});
+process.on("unhandledRejection", (err) => {
+  debugLog(`unhandledRejection: ${err?.message || err}\n${err?.stack || ""}`);
+  emitAndExit(ROUTING_BLOCK);
+});
 
 let additionalContext = ROUTING_BLOCK;
 
@@ -40,19 +78,21 @@ try {
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
     const sessionId = getSessionId(input);
-    const resume = db.getResume(sessionId);
 
-    if (resume && !resume.consumed) {
-      db.markResumeConsumed(sessionId);
+    try {
+      const resume = db.getResume(sessionId);
+      if (resume && !resume.consumed) {
+        db.markResumeConsumed(sessionId);
+      }
+
+      const events = getSessionEvents(db, sessionId);
+      if (events.length > 0) {
+        const eventMeta = writeSessionEventsFile(events, getSessionEventsPath());
+        additionalContext += buildSessionDirective("compact", eventMeta);
+      }
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
     }
-
-    const events = getSessionEvents(db, sessionId);
-    if (events.length > 0) {
-      const eventMeta = writeSessionEventsFile(events, getSessionEventsPath());
-      additionalContext += buildSessionDirective("compact", eventMeta);
-    }
-
-    db.close();
   } else if (source === "resume") {
     // User used --continue — clear cleanup flag so startup doesn't wipe data
     try { unlinkSync(getCleanupFlagPath()); } catch { /* no flag */ }
@@ -61,79 +101,66 @@ try {
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
 
-    const events = getLatestSessionEvents(db);
-    if (events.length > 0) {
-      const eventMeta = writeSessionEventsFile(events, getSessionEventsPath());
-      additionalContext += buildSessionDirective("resume", eventMeta);
+    try {
+      const events = getLatestSessionEvents(db);
+      if (events.length > 0) {
+        const eventMeta = writeSessionEventsFile(events, getSessionEventsPath());
+        additionalContext += buildSessionDirective("resume", eventMeta);
+      }
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
     }
-
-    db.close();
   } else if (source === "startup") {
     // Fresh session (no --continue) — clean slate, capture CLAUDE.md rules.
     const { SessionDB } = await loadSessionDB();
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
-    try { unlinkSync(getSessionEventsPath()); } catch { /* no stale file */ }
 
-    // Detect true fresh start vs --continue (which fires startup→resume).
-    // If cleanup flag exists from a PREVIOUS startup that was never followed by
-    // resume, that was a true fresh start — aggressively wipe all data.
-    const cleanupFlag = getCleanupFlagPath();
-    let previousWasFresh = false;
-    try { readFileSync(cleanupFlag); previousWasFresh = true; } catch { /* no flag */ }
+    try {
+      try { unlinkSync(getSessionEventsPath()); } catch { /* no stale file */ }
 
-    if (previousWasFresh) {
-      // Previous session was a true fresh start (no --continue) — clean slate
-      db.cleanupOldSessions(0);
-    } else {
-      // First startup or --continue will follow — only clean old sessions
-      db.cleanupOldSessions(7);
+      // Detect true fresh start vs --continue (which fires startup→resume).
+      // If cleanup flag exists from a PREVIOUS startup that was never followed by
+      // resume, that was a true fresh start — aggressively wipe all data.
+      const cleanupFlag = getCleanupFlagPath();
+      let previousWasFresh = false;
+      try { readFileSync(cleanupFlag); previousWasFresh = true; } catch { /* no flag */ }
+
+      if (previousWasFresh) {
+        db.cleanupOldSessions(0);
+      } else {
+        db.cleanupOldSessions(7);
+      }
+      db.db.exec(`DELETE FROM session_events WHERE session_id NOT IN (SELECT session_id FROM session_meta)`);
+
+      writeFileSync(cleanupFlag, new Date().toISOString(), "utf-8");
+
+      // Proactively capture CLAUDE.md files
+      const sessionId = getSessionId(input);
+      const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+      db.ensureSession(sessionId, projectDir);
+      const claudeMdPaths = [
+        join(homedir(), ".claude", "CLAUDE.md"),
+        join(projectDir, "CLAUDE.md"),
+        join(projectDir, ".claude", "CLAUDE.md"),
+      ];
+      for (const p of claudeMdPaths) {
+        try {
+          const content = readFileSync(p, "utf-8");
+          if (content.trim()) {
+            db.insertEvent(sessionId, { type: "rule", category: "rule", data: p, priority: 1 });
+            db.insertEvent(sessionId, { type: "rule_content", category: "rule", data: content, priority: 1 });
+          }
+        } catch { /* file doesn't exist — skip */ }
+      }
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
     }
-    db.db.exec(`DELETE FROM session_events WHERE session_id NOT IN (SELECT session_id FROM session_meta)`);
-
-    // Write cleanup flag — resume will delete it if --continue follows
-    writeFileSync(cleanupFlag, new Date().toISOString(), "utf-8");
-
-    // Proactively capture CLAUDE.md files — Claude Code loads them as system
-    // context at startup, invisible to PostToolUse hooks. We read them from
-    // disk so they survive compact/resume via the session events pipeline.
-    const sessionId = getSessionId(input);
-    const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-    db.ensureSession(sessionId, projectDir);
-    const claudeMdPaths = [
-      join(homedir(), ".claude", "CLAUDE.md"),
-      join(projectDir, "CLAUDE.md"),
-      join(projectDir, ".claude", "CLAUDE.md"),
-    ];
-    for (const p of claudeMdPaths) {
-      try {
-        const content = readFileSync(p, "utf-8");
-        if (content.trim()) {
-          db.insertEvent(sessionId, { type: "rule", category: "rule", data: p, priority: 1 });
-          db.insertEvent(sessionId, { type: "rule_content", category: "rule", data: content, priority: 1 });
-        }
-      } catch { /* file doesn't exist — skip */ }
-    }
-
-    db.close();
   }
   // "clear" — no action needed
 } catch (err) {
   // Session continuity is best-effort — never block session start
-  try {
-    const { appendFileSync } = await import("node:fs");
-    const { join: pjoin } = await import("node:path");
-    const { homedir } = await import("node:os");
-    appendFileSync(
-      pjoin(homedir(), ".claude", "context-mode", "sessionstart-debug.log"),
-      `[${new Date().toISOString()}] ${err?.message || err}\n${err?.stack || ""}\n`,
-    );
-  } catch { /* ignore logging failure */ }
+  debugLog(`${err?.message || err}\n${err?.stack || ""}`);
 }
 
-console.log(JSON.stringify({
-  hookSpecificOutput: {
-    hookEventName: "SessionStart",
-    additionalContext,
-  },
-}));
+emitAndExit(additionalContext);

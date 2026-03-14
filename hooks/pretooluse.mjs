@@ -129,15 +129,18 @@ try {
 const __hookDir = dirname(fileURLToPath(import.meta.url));
 await initSecurity(resolve(__hookDir, "..", "build"));
 
-// ─── Read stdin ───
-const raw = await readStdin();
-const input = JSON.parse(raw);
-const tool = input.tool_name ?? "";
-const toolInput = input.tool_input ?? {};
+// ─── Read stdin and route ───
+try {
+  const raw = await readStdin();
+  const input = JSON.parse(raw);
+  const tool = input.tool_name ?? "";
+  const toolInput = input.tool_input ?? {};
 
-// ─── Route and format response ───
-const decision = routePreToolUse(tool, toolInput, process.env.CLAUDE_PROJECT_DIR);
-const response = formatDecision("claude-code", decision);
-if (response !== null) {
-  process.stdout.write(JSON.stringify(response) + "\n");
+  const decision = routePreToolUse(tool, toolInput, process.env.CLAUDE_PROJECT_DIR);
+  const response = formatDecision("claude-code", decision);
+  if (response !== null) {
+    process.stdout.write(JSON.stringify(response) + "\n");
+  }
+} catch {
+  // PreToolUse must never block the session — silent fallback (allow tool to proceed)
 }

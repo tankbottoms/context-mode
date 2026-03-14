@@ -29,25 +29,28 @@ try {
 
   const dbPath = getSessionDBPath();
   const db = new SessionDB({ dbPath });
-  const sessionId = getSessionId(input);
 
-  // Get all events for this session
-  const events = db.getEvents(sessionId);
+  try {
+    const sessionId = getSessionId(input);
 
-  if (events.length > 0) {
-    const stats = db.getSessionStats(sessionId);
-    const snapshot = buildResumeSnapshot(events, {
-      compactCount: (stats?.compact_count ?? 0) + 1,
-    });
+    // Get all events for this session
+    const events = db.getEvents(sessionId);
 
-    db.upsertResume(sessionId, snapshot, events.length);
-    db.incrementCompactCount(sessionId);
+    if (events.length > 0) {
+      const stats = db.getSessionStats(sessionId);
+      const snapshot = buildResumeSnapshot(events, {
+        compactCount: (stats?.compact_count ?? 0) + 1,
+      });
+
+      db.upsertResume(sessionId, snapshot, events.length);
+      db.incrementCompactCount(sessionId);
+    }
+  } finally {
+    try { db.close(); } catch { /* ignore */ }
   }
-
-  db.close();
 } catch (err) {
   try {
-    appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${err.message}\n`);
+    appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${err?.message || err}\n`);
   } catch {
     // Silent fallback
   }
